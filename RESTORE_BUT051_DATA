@@ -1,0 +1,350 @@
+REPORT z_restore_but051_data_2.
+
+*--------------------------------------------------------------------------*
+* This report is used to restore information in BUT051 from ADR6 and ADCP. *
+* Required in case of an upgrade to old support packages, like             *
+*$  Release 700          SAPKU70001 - SAPKU70013                           *
+*$  Release 701          SAPKU70103 - SAPKU70110                           *
+*$  Release 702          SAPKU70201 - SAPKU70206                           *
+*--------------------------------------------------------------------------*
+* A backup file will be written, in DIR_SAPUSERS, called BUT051_BACKUP.TXT *
+* Format of data backup file:                                              *
+*      field separator          = '#'                                      *
+*      empty field              = '/'                                      *
+*      carriage return/new line = '##'                                     *
+*--------------------------------------------------------------------------*
+
+* Types and Declarations
+*--------------------------------------------------------------------------
+  TABLES: BUT051.
+
+  TYPES:
+    BEGIN OF ltyp_p1_p2,
+      relnr         TYPE but052-relnr,
+      partner1      TYPE but052-partner1,
+      partner2      TYPE but052-partner2,
+      date_to       TYPE but052-date_to,
+      p1_addrnumber TYPE but052-addrnumber,
+      p2_persnumber TYPE but000-persnumber,
+      smtp_addr     TYPE adr6-smtp_addr,
+      tel_number    TYPE adcp-tel_number,
+      tel_extens    TYPE adcp-tel_extens,
+      fax_number    TYPE adcp-fax_number,
+      fax_extens    TYPE adcp-fax_extens,
+      function      TYPE adcp-function,
+      department    TYPE adcp-department,
+    END OF ltyp_p1_p2.
+
+
+  DATA:
+      lt_but051       TYPE TABLE OF but051,
+      lt_but051_upd   TYPE TABLE OF but051,
+      ls_but051       TYPE but051,
+      lt_p1_p2        TYPE TABLE OF ltyp_p1_p2,
+      ls_p1_p2        TYPE ltyp_p1_p2,
+      lv_field_list   TYPE string,
+      lv_join_tab     TYPE tabname,
+      lv_joined_from  TYPE string,
+      lv_cursor       TYPE cursor,
+      fpath_file      TYPE string VALUE 'C:\Z_RESTORE_BUT051_DATA\'.
+
+  DATA: lv_partner_low  TYPE bu_partner,
+        lv_partner_high TYPE bu_partner.
+
+  DATA: ls_but051_backup TYPE but051,
+        lt_but051_backup TYPE TABLE OF but051.
+
+  FIELD-SYMBOLS: <ls_but051_upd> TYPE but051.
+  FIELD-SYMBOLS: <fs_but051> TYPE but051.
+
+  PARAMETERS: testrun TYPE c LENGTH 1 DEFAULT 'X'.
+
+  SELECT-OPTIONS: partner FOR but051-partner1 NO-EXTENSION OBLIGATORY.
+
+
+
+****************************************************************************
+* Begin
+****************************************************************************
+
+  CHECK partner-low IS NOT INITIAL AND partner-high IS NOT INITIAL.
+
+* Cursor to get records from BUT051 with empty email, function, department, telephone or fax
+  OPEN CURSOR WITH HOLD lv_cursor FOR
+    SELECT *
+      FROM        but051 AS b51
+      INNER JOIN  but052 AS b52
+        ON
+          b52~relnr    = b51~relnr    AND
+          b52~partner1 = b51~partner1 AND
+          b52~partner2 = b51~partner2
+      WHERE
+          b51~reltyp   = 'BUR001' AND
+          b51~partner1 IN partner AND
+        ( smtp_address = '' OR
+          fnctn        = '' OR
+          dprtmnt      = '' OR
+          tel_number   = '' OR
+          fax_number   = ''    ).
+
+  CHECK sy-subrc = 0.
+
+  FETCH NEXT CURSOR lv_cursor INTO CORRESPONDING FIELDS OF TABLE lt_but051.
+
+
+  IF lt_but051 IS NOT INITIAL.
+
+    SORT lt_but051 BY relnr partner1 partner2 ASCENDING.
+
+*   Selection for ADR6 (SMTP)
+    SELECT b52~relnr b52~partner1 b52~partner2 b52~addrnumber b00~persnumber adr~smtp_addr
+      FROM but052 AS b52
+        INNER JOIN but000 AS b00 ON b52~partner2 = b00~partner
+        INNER JOIN adr6 AS adr ON b52~addrnumber = adr~addrnumber AND b00~persnumber = adr~persnumber
+        INTO CORRESPONDING FIELDS OF TABLE lt_p1_p2 FOR ALL ENTRIES IN lt_but051
+      WHERE
+        b52~relnr    = lt_but051-relnr    AND
+        b52~partner1 = lt_but051-partner1 AND
+        b52~partner2 = lt_but051-partner2.
+
+    SORT lt_p1_p2 BY relnr partner1 partner2 ASCENDING.
+
+*   Storing record to be corrected in lt_but051_backup + copying SMTP address from ADR6 to lt_but051
+*   It is possible that one relationship has multiple SMTP addresses.
+*   It is also possible that one relationship has no email address
+    IF lt_p1_p2 IS NOT INITIAL.
+      LOOP AT lt_but051 ASSIGNING <ls_but051_upd>.
+        CLEAR: ls_p1_p2, ls_but051_backup.
+        READ TABLE lt_p1_p2 INTO ls_p1_p2 WITH KEY relnr = <ls_but051_upd>-relnr
+                                                   partner1 = <ls_but051_upd>-partner1
+                                                   partner2 = <ls_but051_upd>-partner2 BINARY SEARCH.
+        CHECK sy-subrc = 0.
+        IF <ls_but051_upd>-smtp_address <> ls_p1_p2-smtp_addr.
+          MOVE-CORRESPONDING <ls_but051_upd> TO ls_but051_backup.
+          APPEND ls_but051_backup TO lt_but051_backup.
+
+          <ls_but051_upd>-smtp_address = ls_p1_p2-smtp_addr.
+          APPEND <ls_but051_upd> TO lt_but051_upd.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    CLEAR: lt_p1_p2.
+    UNASSIGN <ls_but051_upd>.
+
+    SORT lt_but051_backup BY relnr partner1 partner2 ASCENDING.
+
+*   Selection for ADCP (company address) to retrieve telephone, fax, function, department
+    SELECT b52~relnr b52~partner1 b52~partner2 b52~addrnumber b00~persnumber
+           adr~tel_number adr~tel_extens adr~fax_number adr~fax_extens adr~function adr~department
+      FROM but052 AS b52
+        INNER JOIN but000 AS b00 ON b52~partner2 = b00~partner
+        INNER JOIN adcp  AS adr ON b52~addrnumber = adr~addrnumber AND b00~persnumber = adr~persnumber
+        INTO CORRESPONDING FIELDS OF TABLE lt_p1_p2 FOR ALL ENTRIES IN lt_but051
+      WHERE
+        b52~relnr    = lt_but051-relnr    AND
+        b52~partner1 = lt_but051-partner1 AND
+        b52~partner2 = lt_but051-partner2.
+
+    SORT lt_p1_p2 BY relnr partner1 partner2 ASCENDING.
+
+*   Storing record to be corrected in lt_but051_backup + copying info from ADCP to lt_but051
+    IF lt_p1_p2 IS NOT INITIAL.
+
+      LOOP AT lt_but051 INTO ls_but051.
+        READ TABLE lt_p1_p2 INTO ls_p1_p2 WITH KEY relnr = ls_but051-relnr
+                                                   partner1 = ls_but051-partner1
+                                                   partner2 = ls_but051-partner2 BINARY SEARCH.
+        CHECK sy-subrc = 0.
+        IF ls_but051-tel_number <> ls_p1_p2-tel_number OR
+           ls_but051-tel_extens <> ls_p1_p2-tel_extens OR
+           ls_but051-fax_number <> ls_p1_p2-fax_number OR
+           ls_but051-fax_extens <> ls_p1_p2-fax_extens OR
+           ls_but051-fnctn      <> ls_p1_p2-function OR
+           ls_but051-dprtmnt    <> ls_p1_p2-department.
+
+          READ TABLE lt_but051_backup TRANSPORTING NO FIELDS
+                WITH KEY relnr    = ls_but051-relnr
+                         partner1 = ls_but051-partner1
+                         partner2 = ls_but051-partner2
+                         reltyp   = ls_but051-reltyp BINARY SEARCH.
+
+          IF sy-subrc NE 0.
+            "record doesn't exist in backup itab, add it
+            MOVE-CORRESPONDING ls_but051 TO ls_but051_backup.
+            APPEND ls_but051_backup TO lt_but051_backup.
+            "add new record to update table
+            ls_but051-tel_number = ls_p1_p2-tel_number.
+            ls_but051-tel_extens = ls_p1_p2-tel_extens.
+            ls_but051-fax_number = ls_p1_p2-fax_number.
+            ls_but051-fax_extens = ls_p1_p2-fax_extens.
+            ls_but051-fnctn      = ls_p1_p2-function.
+            ls_but051-dprtmnt    = ls_p1_p2-department.
+            APPEND ls_but051 TO lt_but051_upd.
+
+            "restore sorting for lt_but051_backup, binary search is used
+            SORT lt_but051_backup BY relnr partner1 partner2 ASCENDING.
+          ELSE.
+            "if it exists in backup, don't add to backup table.
+            "if it exists in backup, it exists in update table : get the record and update it
+            LOOP AT lt_but051_upd ASSIGNING <ls_but051_upd> WHERE relnr = ls_but051-relnr AND
+                                              partner1 = ls_but051-partner1 AND
+                                              partner2 = ls_but051-partner2 AND
+                                              reltyp   = ls_but051-reltyp.
+              <ls_but051_upd>-tel_number = ls_p1_p2-tel_number.
+              <ls_but051_upd>-tel_extens = ls_p1_p2-tel_extens.
+              <ls_but051_upd>-fax_number = ls_p1_p2-fax_number.
+              <ls_but051_upd>-fax_extens = ls_p1_p2-fax_extens.
+              <ls_but051_upd>-fnctn      = ls_p1_p2-function.
+              <ls_but051_upd>-dprtmnt    = ls_p1_p2-department.
+              EXIT.
+            ENDLOOP.
+            UNASSIGN <ls_but051_upd>.
+          ENDIF.
+        ENDIF.
+        CLEAR: ls_but051, ls_p1_p2.
+      ENDLOOP.
+    ENDIF.
+
+    CLEAR: ls_p1_p2, lt_p1_p2.
+
+  ENDIF.
+
+  CLOSE CURSOR lv_cursor.
+
+****************************************************************************
+* Create data backup file
+****************************************************************************
+  IF lt_but051_backup IS NOT INITIAL.
+
+    IF sy-batch IS INITIAL. "foreground mode
+      CONCATENATE fpath_file 'Z_RESTORE_BUT051_DATA.xls' INTO fpath_file.
+
+      CALL FUNCTION 'GUI_DOWNLOAD'
+        EXPORTING
+          filename              = fpath_file
+          filetype              = 'ASC'
+          write_field_separator = 'X'
+        TABLES
+          data_tab              = lt_but051_backup[].
+
+      IF sy-subrc <> 0.
+        WRITE: 'Cannot create backup file Z_RESTORE_BUT051_DATA.xls. Aborting report. '.
+        RETURN.
+      ELSE.
+        WRITE:/ 'Backup file stored at:  '.
+        WRITE: fpath_file.
+      ENDIF.
+
+
+    ELSE. "sy-batch is true = background mode
+      DATA: file_loc(50)  TYPE c VALUE 'but051_backup.txt'.
+      DATA: file_string   TYPE string,
+            file_line     TYPE string,
+            file_field    TYPE string,
+            lt_dfies_tab  TYPE TABLE OF dfies,
+            ls_dfies_wa   TYPE dfies,
+            lt_fields     TYPE TABLE OF fieldname,
+            lv_field      TYPE fieldname,
+            lv_end        TYPE i,
+            lc_crlf(2)    TYPE c VALUE cl_abap_char_utilities=>cr_lf,
+            lv_counter    TYPE i.
+
+      FIELD-SYMBOLS: <fs_field> TYPE any.
+
+      "BUT051 might have been extended
+      CALL FUNCTION 'DDIF_FIELDINFO_GET'
+        EXPORTING
+          tabname              = 'BUT051'
+        TABLES
+          dfies_tab            = lt_dfies_tab
+        EXCEPTIONS
+          not_found            = 1
+          internal_error       = 2
+          OTHERS               = 3.
+
+      IF sy-subrc <> 0.
+        "do not proceed, since data loss could occur
+        WRITE: / 'Error determining fields of table BUT051'.
+        RETURN.
+      ENDIF.
+
+      "get field names
+      LOOP AT lt_dfies_tab INTO ls_dfies_wa.
+        APPEND ls_dfies_wa-fieldname TO lt_fields.
+      ENDLOOP.
+
+      "how many fields - will determine number of times to read BUT051's work area
+      DESCRIBE TABLE lt_fields LINES lv_end.
+
+      TRY.
+
+        "try to open file to write
+        OPEN DATASET file_loc FOR OUTPUT IN TEXT MODE ENCODING DEFAULT.
+
+        CATCH cx_sy_file_open.
+          "do nothing
+        CATCH cx_root.
+          WRITE: 'Cannot create backup file but051_backup.txt. Aborting report.'.
+          RETURN.
+      ENDTRY.
+
+      LOOP AT lt_but051_backup INTO ls_but051.
+        lv_counter = 1.
+        WHILE lv_counter <= lv_end.
+          READ TABLE lt_fields INTO lv_field INDEX lv_counter.
+          IF sy-subrc = 0.
+            ASSIGN COMPONENT lv_field OF STRUCTURE ls_but051 TO <fs_field>.
+            IF <fs_field> IS ASSIGNED.
+              MOVE <fs_field> TO file_field.
+              IF file_field IS INITIAL.
+                file_field = '/'. "empty field
+              ENDIF.
+              IF lv_counter = 1.
+                file_line = file_field. "first field of new record
+              ELSE.
+                CONCATENATE file_line '#' file_field INTO file_line.
+              ENDIF.
+            ENDIF.
+          ENDIF.
+          lv_counter = lv_counter + 1.
+        ENDWHILE.
+
+        IF file_string IS INITIAL. "first line of file
+          file_string = file_line.
+        ELSE.
+          CONCATENATE file_string lc_crlf file_line INTO file_string.
+        ENDIF.
+
+        CLEAR: file_line, file_field.
+      ENDLOOP.
+
+      TRY.
+        "transfer string to file
+        TRANSFER file_string TO file_loc.
+
+        CATCH cx_root.
+          WRITE: 'Cannot write to backup file but051_backup.txt. Aborting report.'.
+          CLOSE DATASET file_loc.
+          RETURN.
+      ENDTRY.
+
+      CLOSE DATASET file_loc.
+
+      WRITE: / 'Backup file ''BUT051_BACKUP.TXT'' can be found under the DIR_SAPUSERS directory.'.
+    ENDIF.
+
+****************************************************************************
+* Update Database (if test run mode is not checked)
+****************************************************************************
+    SORT lt_but051_upd BY relnr partner1 partner2 ASCENDING.
+
+    IF testrun IS INITIAL.
+      UPDATE but051 FROM TABLE lt_but051_upd.
+      COMMIT WORK AND WAIT.
+      WRITE:/ 'Changes committed to the database.'.
+    ELSE.
+      WRITE:/ 'Test run successful.'.
+    ENDIF.
+
+  ENDIF.
